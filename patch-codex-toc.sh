@@ -9,8 +9,8 @@ DEFAULT_EXT_ID="openai.chatgpt"
 RAIL_GATE_NEEDLE='c=St(`2551582477`)&&a,l,u;if'
 RAIL_GATE_PATCHED='c=a,l,u;if'
 TOC_BRIDGE_MARKER='__codexThreadTocSource'
-TOC_BRIDGE_NEEDLE='});(0,Q.useEffect)(()=>to(f,e,{revealItem:Ue}),[e,Ue,f])'
-TOC_BRIDGE_SNIPPET='globalThis.__codexThreadTocSource={conversationId:e,isConversationHistoryComplete:()=>f.get(ne,e)??!1,getItems:()=>Kf({isConversationHistoryComplete:!0,isAppgenEndCardEnabled:m,isBackgroundSubagentsEnabled:a,modelProvider:g,projectlessOutputDirectory:T,visibleTurnEntries:N}).map((e,t)=>({id:e.id,turnKey:e.turnKey,index:t,label:typeof e.getLabel==`function`?e.getLabel():``})),reveal:async t=>{let n=Kf({isConversationHistoryComplete:!0,isAppgenEndCardEnabled:m,isBackgroundSubagentsEnabled:a,modelProvider:g,projectlessOutputDirectory:T,visibleTurnEntries:N}).find(e=>e.id===t);n!=null&&await He(n)},loadOlderOnce:async()=>{if(f.get(ne,e)??!1)return!0;try{return await oe(`load-older-conversation-history-page`,{conversationId:e,dependentConversationIds:V==null?[]:[V]}),await Gn(),f.get(ne,e)??!1}catch(t){return!0}},loadAllHistory:async()=>{for(let t=0;t<80;t+=1){if(f.get(ne,e)??!1)return!0;try{await oe(`load-older-conversation-history-page`,{conversationId:e,dependentConversationIds:V==null?[]:[V]}),await Gn()}catch(n){return!0}}return f.get(ne,e)??!1}};(0,Q.useEffect)(()=>()=>{globalThis.__codexThreadTocSource?.conversationId===e&&(globalThis.__codexThreadTocSource=null)},[e]);'
+TOC_BRIDGE_START_MARKER='/*codex-toc-bridge:start*/'
+TOC_BRIDGE_END_MARKER='/*codex-toc-bridge:end*/'
 
 usage() {
   cat <<'USAGE'
@@ -35,10 +35,10 @@ Examples:
 After patching, reload VS Code. Toggle the TOC with Ctrl+Alt+O or the TOC
 button ☰ in the Codex conversation header.
 By default this only searches ~/.vscode/extensions.
-The patch also enables Codex's built-in user-message rail locally so the TOC
-can read the full user-question index instead of the virtualized visible rows.
-It also injects a small hidden bridge into the conversation bundle so opening
-the TOC can ask Codex to load older history without manually scrolling.
+The default patch is intentionally portable: it only needs webview/index.html
+and the injected standalone script. When known bundle internals are present it
+also enables Codex's built-in user-message rail and bridge as a best-effort
+enhancement, but unsupported bundle shapes do not block the patch.
 USAGE
 }
 
@@ -163,12 +163,32 @@ toc_bridge_state() {
     return
   fi
 
-  if grep -Fq "$TOC_BRIDGE_NEEDLE" "$rail_bundle"; then
-    printf 'unpatched\n'
-    return
-  fi
+  python3 - "$rail_bundle" <<'PY'
+from pathlib import Path
+import re
+import sys
 
-  printf 'unsupported\n'
+ident = r"[A-Za-z_$][A-Za-z0-9_$]*"
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+anchor_re = re.compile(
+    r"\(0,Q\.useEffect\)\(\(\)=>to\(f,e,\{revealItem:(?P<registered>"
+    + ident +
+    r")\}\),\[e,(?P=registered),f\]\)"
+)
+rail_re = re.compile(
+    r"\(0,\$\.jsx\)\("
+    + ident +
+    r",\{[^{}]*\bgetItems:"
+    + ident +
+    r"[^{}]*\bonRevealItem:"
+    + ident +
+    r"[^{}]*\}\)"
+)
+
+anchor = anchor_re.search(text)
+rail = rail_re.search(text, anchor.end(), min(len(text), anchor.end() + 10000)) if anchor else None
+print("unpatched" if anchor and rail else "unsupported")
+PY
 }
 
 [[ -d "$extension_dir" ]] || die "extension directory does not exist: $extension_dir"
@@ -202,10 +222,10 @@ require_supported_rail_gate() {
       info "rail gate can be enabled: $rail_bundle"
       ;;
     missing)
-      die "could not find webview/assets/local-conversation-thread-*.js; refusing to patch without the full user-question rail"
+      info "warning: could not find webview/assets/local-conversation-thread-*.js; skipping optional user-message rail patch"
       ;;
     unsupported)
-      die "rail gate pattern not found in $rail_bundle; this Codex extension version is not supported by this patch"
+      info "warning: rail gate pattern not found in $rail_bundle; skipping optional user-message rail patch"
       ;;
     *)
       die "unknown rail gate state: $state"
@@ -225,10 +245,10 @@ require_supported_toc_bridge() {
       info "TOC conversation bridge can be installed: $rail_bundle"
       ;;
     missing)
-      die "could not find webview/assets/local-conversation-thread-*.js; refusing to patch without the TOC conversation bridge"
+      info "warning: could not find webview/assets/local-conversation-thread-*.js; skipping optional TOC conversation bridge"
       ;;
     unsupported)
-      die "TOC bridge pattern not found in $rail_bundle; this Codex extension version is not supported by this patch"
+      info "warning: TOC bridge pattern not found in $rail_bundle; skipping optional TOC conversation bridge"
       ;;
     *)
       die "unknown TOC bridge state: $state"
@@ -248,11 +268,18 @@ write_inject_js() {
   const TOC_ID = "codex-thread-toc-inject";
   const STYLE_ID = "codex-toc-style";
   const TOOLBAR_BUTTON_ID = "codex-thread-toc-toolbar-button";
+  const FLOATING_BUTTON_ID = "codex-thread-toc-floating-button";
   const RAIL_BUTTON_SELECTOR = "[data-thread-user-message-navigation-item-id]";
   const RAIL_LIST_SELECTOR = "[data-thread-user-message-navigation-rail-list]";
   const USER_ANCHOR_SELECTOR = "[data-local-conversation-user-anchor]";
   const SEARCH_UNIT_SELECTOR = "[data-content-search-unit-key]";
   const USER_BUBBLE_SELECTOR = "[data-user-message-bubble]";
+  const USER_TEXT_SELECTORS = [
+    USER_BUBBLE_SELECTOR,
+    "[data-message-author-role='user']",
+    "[data-testid*='user-message' i]",
+    "[class*='user-message' i]"
+  ];
   const MAX_ITEMS = 1000;
 
   let visible = false;
@@ -369,7 +396,8 @@ write_inject_js() {
         margin: 6px 4px;
         opacity: .72;
       }
-      #${TOOLBAR_BUTTON_ID} {
+      #${TOOLBAR_BUTTON_ID},
+      #${FLOATING_BUTTON_ID} {
         width: 28px;
         height: 28px;
         display: inline-flex;
@@ -384,8 +412,22 @@ write_inject_js() {
         font: inherit;
         opacity: .82;
       }
+      #${FLOATING_BUTTON_ID} {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 2147483646;
+        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+        background: var(--vscode-sideBar-background, #1e1e1e);
+        box-shadow: 0 4px 16px rgba(0,0,0,.18);
+      }
+      #${FLOATING_BUTTON_ID}[hidden] {
+        display: none;
+      }
       #${TOOLBAR_BUTTON_ID}:hover,
-      #${TOOLBAR_BUTTON_ID}.is-active {
+      #${TOOLBAR_BUTTON_ID}.is-active,
+      #${FLOATING_BUTTON_ID}:hover,
+      #${FLOATING_BUTTON_ID}.is-active {
         background: color-mix(in srgb, currentColor 12%, transparent);
         opacity: 1;
       }
@@ -446,11 +488,28 @@ write_inject_js() {
     return groups.sort((left, right) => right.rect.right - left.rect.right || right.rect.width - left.rect.width)[0]?.el || null;
   }
 
-  function updateToolbarButton() {
-    const button = document.getElementById(TOOLBAR_BUTTON_ID);
+  function updateButtonState(button) {
     if (!(button instanceof HTMLElement)) return;
     button.classList.toggle("is-active", visible);
     button.setAttribute("aria-pressed", visible ? "true" : "false");
+  }
+
+  function createToggleButton(id) {
+    let button = document.getElementById(id);
+    if (button instanceof HTMLButtonElement) return button;
+
+    button = document.createElement("button");
+    button.id = id;
+    button.type = "button";
+    button.title = "User Questions";
+    button.setAttribute("aria-label", "Show user questions");
+    button.textContent = "☰";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setVisible(!visible);
+    });
+    return button;
   }
 
   function ensureToolbarButton() {
@@ -458,26 +517,27 @@ write_inject_js() {
     const group = findHeaderActionGroup();
     if (!group) return null;
 
-    let button = document.getElementById(TOOLBAR_BUTTON_ID);
-    if (!(button instanceof HTMLButtonElement)) {
-      button = document.createElement("button");
-      button.id = TOOLBAR_BUTTON_ID;
-      button.type = "button";
-      button.title = "User Questions";
-      button.setAttribute("aria-label", "Show user questions");
-      button.textContent = "#";
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        setVisible(!visible);
-      });
-    }
+    const button = createToggleButton(TOOLBAR_BUTTON_ID);
 
     if (button.parentElement !== group || group.firstElementChild !== button) {
       group.insertBefore(button, group.firstElementChild);
     }
-    updateToolbarButton();
+    updateButtonState(button);
     return button;
+  }
+
+  function ensureFloatingButton(toolbarButton) {
+    ensureStyle();
+    const button = createToggleButton(FLOATING_BUTTON_ID);
+    if (button.parentElement !== document.body) document.body.appendChild(button);
+    button.hidden = toolbarButton instanceof HTMLElement && toolbarButton.isConnected;
+    updateButtonState(button);
+    return button;
+  }
+
+  function ensureControls() {
+    const toolbarButton = ensureToolbarButton();
+    ensureFloatingButton(toolbarButton);
   }
 
   function clamp(value, min, max) {
@@ -654,10 +714,22 @@ write_inject_js() {
       .filter((anchor) => anchor instanceof HTMLElement && !anchor.closest(`#${TOC_ID}`));
     if (anchors.length > 0) return anchors.slice(0, MAX_ITEMS);
 
-    return [...document.querySelectorAll(USER_BUBBLE_SELECTOR)]
-      .map((bubble) => bubble.closest(SEARCH_UNIT_SELECTOR) || bubble)
-      .filter((anchor, index, all) => anchor instanceof HTMLElement && all.indexOf(anchor) === index && !anchor.closest(`#${TOC_ID}`))
-      .slice(0, MAX_ITEMS);
+    const seen = new Set();
+    const next = [];
+    for (const selector of USER_TEXT_SELECTORS) {
+      for (const bubble of document.querySelectorAll(selector)) {
+        const anchor = bubble.closest(SEARCH_UNIT_SELECTOR) || bubble.closest("[data-testid*='turn' i]") || bubble;
+        if (!(anchor instanceof HTMLElement)) continue;
+        if (anchor.closest(`#${TOC_ID}`) || anchor.closest(`#${FLOATING_BUTTON_ID}`)) continue;
+        if (seen.has(anchor)) continue;
+        const text = cleanQuestionText(normalizedText(anchor));
+        if (!text) continue;
+        seen.add(anchor);
+        next.push(anchor);
+        if (next.length >= MAX_ITEMS) return next;
+      }
+    }
+    return next;
   }
 
   function getExactAnchorById(id) {
@@ -1030,7 +1102,7 @@ write_inject_js() {
 
   function handleMutations(mutations) {
     if (mutations.length > 0 && mutations.every(mutationTouchesToc)) return;
-    ensureToolbarButton();
+    ensureControls();
     syncItems();
     scheduleRefresh();
   }
@@ -1041,7 +1113,7 @@ write_inject_js() {
     const el = ensurePanel();
     el.hidden = !visible;
     if (visible) refreshNow();
-    updateToolbarButton();
+    ensureControls();
   }
 
   document.addEventListener("keydown", (event) => {
@@ -1056,7 +1128,7 @@ write_inject_js() {
 
   function boot() {
     ensurePanel();
-    ensureToolbarButton();
+    ensureControls();
     routeKey = contextKey();
     observer.observe(document.body, {
       childList: true,
@@ -1147,17 +1219,26 @@ PY
 }
 
 patch_rail_gate() {
-  if [[ -z "$rail_bundle" ]]; then
-    die "could not find webview/assets/local-conversation-thread-*.js; refusing to patch rail gate"
+  local state
+  state="$(rail_gate_state)"
+
+  if [[ "$state" == "missing" ]]; then
+    info "skipping optional rail gate patch: local conversation bundle not found"
+    return
   fi
 
-  if grep -Fq "$RAIL_GATE_PATCHED" "$rail_bundle"; then
+  if [[ "$state" == "unsupported" ]]; then
+    info "skipping optional rail gate patch: unsupported bundle shape"
+    return
+  fi
+
+  if [[ "$state" == "patched" ]]; then
     info "rail gate already patched: $rail_bundle"
     return
   fi
 
-  if ! grep -Fq "$RAIL_GATE_NEEDLE" "$rail_bundle"; then
-    die "rail gate pattern not found in $rail_bundle"
+  if [[ "$state" != "unpatched" ]]; then
+    die "unknown rail gate state: $state"
   fi
 
   ensure_rail_bundle_backup
@@ -1207,17 +1288,26 @@ ensure_rail_bundle_backup() {
 }
 
 patch_toc_bridge() {
-  if [[ -z "$rail_bundle" ]]; then
-    die "could not find webview/assets/local-conversation-thread-*.js; refusing to patch TOC bridge"
+  local state
+  state="$(toc_bridge_state)"
+
+  if [[ "$state" == "missing" ]]; then
+    info "skipping optional TOC bridge patch: local conversation bundle not found"
+    return
   fi
 
-  if grep -Fq "$TOC_BRIDGE_MARKER" "$rail_bundle"; then
+  if [[ "$state" == "unsupported" ]]; then
+    info "skipping optional TOC bridge patch: unsupported bundle shape"
+    return
+  fi
+
+  if [[ "$state" == "patched" ]]; then
     info "TOC bridge already patched: $rail_bundle"
     return
   fi
 
-  if ! grep -Fq "$TOC_BRIDGE_NEEDLE" "$rail_bundle"; then
-    die "TOC bridge pattern not found in $rail_bundle"
+  if [[ "$state" != "unpatched" ]]; then
+    die "unknown TOC bridge state: $state"
   fi
 
   ensure_rail_bundle_backup
@@ -1227,20 +1317,87 @@ patch_toc_bridge() {
     return
   fi
 
-  python3 - "$rail_bundle" "$TOC_BRIDGE_NEEDLE" "$TOC_BRIDGE_SNIPPET" <<'PY'
+  python3 - "$rail_bundle" "$TOC_BRIDGE_MARKER" "$TOC_BRIDGE_START_MARKER" "$TOC_BRIDGE_END_MARKER" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 path = Path(sys.argv[1])
-needle = sys.argv[2]
-snippet = sys.argv[3]
+bridge_marker = sys.argv[2]
+start_marker = sys.argv[3]
+end_marker = sys.argv[4]
 text = path.read_text(encoding="utf-8")
-if "__codexThreadTocSource" in text:
+
+if bridge_marker in text:
     raise SystemExit(0)
-if needle not in text:
+
+ident = r"[A-Za-z_$][A-Za-z0-9_$]*"
+anchor_re = re.compile(
+    r"\(0,Q\.useEffect\)\(\(\)=>to\((?P<store>"
+    + ident +
+    r"),e,\{revealItem:(?P<registered>"
+    + ident +
+    r")\}\),\[e,(?P=registered),(?P=store)\]\)"
+)
+rail_re = re.compile(
+    r"\(0,\$\.jsx\)\("
+    + ident +
+    r",\{(?P<props>[^{}]*\bgetItems:[^{}]*\bonRevealItem:[^{}]*)\}\)"
+)
+complete_re = re.compile(r"(?P<var>" + ident + r")=M\((?P<atom>" + ident + r"),e\)\?\?!1")
+dependent_re = re.compile(
+    r"(?P<parent>"
+    + ident +
+    r")=M\("
+    + ident +
+    r",e\),(?P<child>"
+    + ident +
+    r")=a\?(?P=parent):null"
+)
+
+def prop_value(props, name):
+    match = re.search(r"(?:^|,)" + re.escape(name) + r":(" + ident + r")(?=,|$)", props)
+    return match.group(1) if match else None
+
+anchor = anchor_re.search(text)
+if anchor is None:
     raise SystemExit("TOC bridge pattern not found")
-patched = "});" + snippet + needle[3:]
-text = text.replace(needle, patched, 1)
+
+rail = rail_re.search(text, anchor.end(), min(len(text), anchor.end() + 10000))
+if rail is None:
+    raise SystemExit("TOC bridge rail props not found")
+
+props = rail.group("props")
+get_items = prop_value(props, "getItems")
+reveal_item = prop_value(props, "onRevealItem")
+if get_items is None or reveal_item is None:
+    raise SystemExit("TOC bridge rail item handlers not found")
+
+prefix = text[max(0, anchor.start() - 6000):anchor.start()]
+complete_matches = list(complete_re.finditer(prefix))
+complete_expr = f"{anchor.group('store')}.get(ne,e)??!1"
+if complete_matches:
+    complete_atom = complete_matches[-1].group("atom")
+    complete_expr = f"{anchor.group('store')}.get({complete_atom},e)??!1"
+
+dependent_matches = list(dependent_re.finditer(prefix))
+dependent_expr = "[]"
+if dependent_matches:
+    parent = dependent_matches[-1].group("parent")
+    dependent_expr = f"{parent}==null?[]:[{parent}]"
+
+snippet = (
+    start_marker
+    + "globalThis.__codexThreadTocSource={conversationId:e,"
+    + f"isConversationHistoryComplete:()=>{complete_expr},"
+    + f"getItems:()=>{get_items}().map((e,t)=>({{id:e.id,turnKey:e.turnKey,index:t,label:typeof e.getLabel==`function`?e.getLabel():``}})),"
+    + f"reveal:async t=>{{let n={get_items}().find(e=>e.id===t);n!=null&&await {reveal_item}(n)}},"
+    + f"loadOlderOnce:async()=>{{if({complete_expr})return!0;try{{return await oe(`load-older-conversation-history-page`,{{conversationId:e,dependentConversationIds:{dependent_expr}}}),await Gn(),{complete_expr}}}catch(t){{return!0}}}},"
+    + f"loadAllHistory:async()=>{{for(let t=0;t<80;t+=1){{if({complete_expr})return!0;try{{await oe(`load-older-conversation-history-page`,{{conversationId:e,dependentConversationIds:{dependent_expr}}}),await Gn()}}catch(n){{return!0}}}}return {complete_expr}}}}};"
+    + "(0,Q.useEffect)(()=>()=>{globalThis.__codexThreadTocSource?.conversationId===e&&(globalThis.__codexThreadTocSource=null)},[e]);"
+    + end_marker
+)
+text = text[:anchor.start()] + snippet + text[anchor.start():]
 path.write_text(text, encoding="utf-8")
 PY
 }
@@ -1314,16 +1471,26 @@ unpatch_toc_bridge() {
   fi
 
   if grep -Fq "$TOC_BRIDGE_MARKER" "$rail_bundle"; then
-    python3 - "$rail_bundle" "$TOC_BRIDGE_NEEDLE" "$TOC_BRIDGE_SNIPPET" <<'PY'
+    python3 - "$rail_bundle" "$TOC_BRIDGE_START_MARKER" "$TOC_BRIDGE_END_MARKER" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 path = Path(sys.argv[1])
-needle = sys.argv[2]
-snippet = sys.argv[3]
+start_marker = re.escape(sys.argv[2])
+end_marker = re.escape(sys.argv[3])
 text = path.read_text(encoding="utf-8")
-patched = "});" + snippet + needle[3:]
-text = text.replace(patched, needle, 1)
+pattern = re.compile(start_marker + r".*?" + end_marker, re.S)
+text, count = pattern.subn("", text, count=1)
+if count == 0:
+    pattern = re.compile(
+        r"globalThis\.__codexThreadTocSource=\{.*?"
+        r"\(0,Q\.useEffect\)\(\(\)=>\(\)=>\{globalThis\.__codexThreadTocSource\?\.conversationId===e&&\(globalThis\.__codexThreadTocSource=null\)\},\[e\]\);",
+        re.S,
+    )
+    text, count = pattern.subn("", text, count=1)
+if count == 0:
+    raise SystemExit("TOC bridge marker found but bridge block could not be removed")
 path.write_text(text, encoding="utf-8")
 PY
     info "removed TOC bridge: $rail_bundle"
