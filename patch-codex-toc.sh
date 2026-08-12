@@ -293,6 +293,8 @@ write_inject_js() {
   let historyLoadInFlight = false;
   let historyLoadAttemptedKey = "";
   let collapsed = false;
+  let searchVisible = false;
+  let searchQuery = "";
   let dragState = null;
 
   function ensureStyle() {
@@ -364,6 +366,28 @@ write_inject_js() {
       #${TOC_ID} .toc-icon:hover,
       #${TOC_ID} .toc-item:hover {
         background: color-mix(in srgb, currentColor 14%, transparent);
+      }
+      #${TOC_ID} .toc-search {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin: 0 0 8px;
+      }
+      #${TOC_ID} .toc-search-input {
+        min-width: 0;
+        width: 100%;
+        height: 26px;
+        border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+        border-radius: 5px;
+        padding: 3px 7px;
+        color: inherit;
+        background: color-mix(in srgb, currentColor 7%, transparent);
+        font: inherit;
+        outline: none;
+      }
+      #${TOC_ID} .toc-search-input:focus {
+        border-color: var(--vscode-focusBorder, #4da3ff);
+        box-shadow: 0 0 0 1px var(--vscode-focusBorder, #4da3ff);
       }
       #${TOC_ID} .toc-item {
         display: grid;
@@ -768,6 +792,19 @@ write_inject_js() {
     return labelsById.get(item.id) || defaultLabel(item.index);
   }
 
+  function normalizedSearchText(value) {
+    return String(value || "").toLocaleLowerCase();
+  }
+
+  function visibleItems() {
+    const query = normalizedSearchText(searchQuery).trim();
+    if (!query) return items;
+    return items.filter((item) => {
+      const indexText = String(item.index + 1);
+      return indexText.includes(query) || normalizedSearchText(itemLabel(item)).includes(query);
+    });
+  }
+
   function pruneLabels(ids, source) {
     const next = new Map();
     for (const id of ids) {
@@ -1018,6 +1055,10 @@ write_inject_js() {
 
   function renderPanel() {
     const el = ensurePanel();
+    const activeElement = document.activeElement;
+    const wasSearching = activeElement?.closest?.(`#${TOC_ID}`) && activeElement?.classList?.contains("toc-search-input");
+    const selectionStart = wasSearching ? activeElement.selectionStart : null;
+    const selectionEnd = wasSearching ? activeElement.selectionEnd : null;
     el.innerHTML = "";
     el.dataset.collapsed = collapsed ? "true" : "false";
 
@@ -1036,19 +1077,66 @@ write_inject_js() {
     const actions = document.createElement("div");
     actions.className = "toc-actions";
 
+    const search = document.createElement("button");
+    search.className = "toc-icon";
+    search.textContent = "S";
+    search.title = "Search questions";
+    search.setAttribute("aria-label", "Search questions");
+    search.setAttribute("aria-pressed", searchVisible ? "true" : "false");
+    search.addEventListener("click", () => {
+      searchVisible = !searchVisible;
+      refreshNow();
+      if (searchVisible) {
+        requestAnimationFrame(() => {
+          const input = document.querySelector(`#${TOC_ID} .toc-search-input`);
+          input?.focus?.({ preventScroll: true });
+          input?.select?.();
+        });
+      }
+    });
+
     const close = document.createElement("button");
     close.className = "toc-icon";
     close.textContent = "x";
     close.title = "Hide TOC (Ctrl+Alt+O)";
     close.addEventListener("click", () => setVisible(false));
 
-    actions.append(close);
+    actions.append(search, close);
     header.append(title, actions);
     el.appendChild(header);
 
     const body = document.createElement("div");
     body.className = "toc-body";
     el.appendChild(body);
+
+    if (searchVisible) {
+      const searchRow = document.createElement("div");
+      searchRow.className = "toc-search";
+
+      const input = document.createElement("input");
+      input.className = "toc-search-input";
+      input.type = "search";
+      input.placeholder = "Search questions";
+      input.value = searchQuery;
+      input.setAttribute("aria-label", "Search questions");
+      input.addEventListener("input", () => {
+        searchQuery = input.value;
+        renderPanel();
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          searchQuery = "";
+          searchVisible = false;
+          renderPanel();
+        }
+      });
+
+      searchRow.appendChild(input);
+      body.appendChild(searchRow);
+    }
+
+    const renderedItems = visibleItems();
 
     if (items.length === 0) {
       const empty = document.createElement("div");
@@ -1058,14 +1146,22 @@ write_inject_js() {
       return;
     }
 
-    items.forEach((item, index) => {
+    if (renderedItems.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "toc-empty";
+      empty.textContent = "No matching questions.";
+      body.appendChild(empty);
+      return;
+    }
+
+    renderedItems.forEach((item) => {
       const btn = document.createElement("button");
       btn.className = `toc-item${isActive(item) ? " is-active" : ""}`;
       btn.title = itemLabel(item);
 
       const kind = document.createElement("span");
       kind.className = "toc-kind";
-      kind.textContent = String(index + 1).padStart(2, "0");
+      kind.textContent = String(item.index + 1).padStart(2, "0");
 
       const text = document.createElement("span");
       text.className = "toc-text";
@@ -1075,6 +1171,14 @@ write_inject_js() {
       btn.addEventListener("click", () => scrollToItem(item));
       body.appendChild(btn);
     });
+
+    if (wasSearching && searchVisible) {
+      const input = el.querySelector(".toc-search-input");
+      input?.focus?.({ preventScroll: true });
+      if (selectionStart != null && selectionEnd != null) {
+        input?.setSelectionRange?.(selectionStart, selectionEnd);
+      }
+    }
   }
 
   function refreshNow() {
