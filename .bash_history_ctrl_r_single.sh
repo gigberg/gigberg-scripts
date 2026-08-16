@@ -18,6 +18,10 @@ __history_picker() {
     local result mode cmd
     local had_histtimeformat=0 old_histtimeformat=""
 
+    # Ctrl+R queues this action after the picker callback. Redraw is the safe
+    # default for fill, cancel, and picker failures; run switches it below.
+    bind '"\e[998~": redraw-current-line'
+
     # Keep Bash history fresh across terminals when possible.
     builtin history -a 2>/dev/null
     builtin history -n 2>/dev/null
@@ -233,16 +237,14 @@ raise SystemExit(main())
             READLINE_POINT=${#READLINE_LINE}
             ;;
         run)
-            # bind -x cannot reliably call readline accept-line from inside the
-            # callback, so execute directly in the current shell. This keeps cd,
-            # export, alias, etc. useful.
-            READLINE_LINE=
-            READLINE_POINT=0
-            printf '\n%s\n' "$cmd"
-            builtin history -s "$cmd"
-            eval "$cmd"
+            READLINE_LINE=$cmd
+            READLINE_POINT=${#READLINE_LINE}
+            bind '"\e[998~": accept-line'
             ;;
     esac
 }
 
-bind -x '"\C-r":__history_picker'
+# A Readline macro can continue with accept-line after the bind -x callback
+# returns. This submits the selected command through Bash's normal input path.
+bind -x '"\e[999~":__history_picker'
+bind '"\C-r":"\e[999~\e[998~"'
