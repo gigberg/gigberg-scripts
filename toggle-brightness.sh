@@ -9,14 +9,36 @@ show_brightness() {
     '
 }
 
-# 仅显示当前亮度
-if [[ "${1:-}" == "--show" || "${1:-}" == "-s" ]]; then
-  show_brightness
-  exit 0
-fi
+show_help() {
+  cat <<EOF
+Usage:
+  $(basename "$0") [OPTION]
 
-# 判断是否所有显示器都已调暗
-if xrandr --verbose | awk '
+Options:
+  --light     Set all connected displays to brightness 1
+  --dark      Set all connected displays to brightness 0
+  --toggle    Toggle between light and dark
+  --show, -s  Show current brightness
+  --help, -h  Show this help
+
+With no option, --toggle is used.
+EOF
+}
+
+set_brightness() {
+  local target="$1"
+
+  xrandr --query | awk '/ connected/ {print $1}' | while read -r output; do
+    echo "Setting $output -> Brightness $target"
+    xrandr --output "$output" --brightness "$target"
+  done
+
+  echo
+  show_brightness
+}
+
+is_dark() {
+  xrandr --verbose | awk '
     / connected/ { connected = 1; next }
     connected && /Brightness:/ {
         print $2
@@ -32,17 +54,49 @@ if xrandr --verbose | awk '
     END {
         exit !(seen && dimmed)
     }
-'; then
-  target=1
-else
-  target=0
-fi
+  '
+}
 
-# 设置所有显示器
-xrandr --query | awk '/ connected/ {print $1}' | while read -r output; do
-  echo "Setting $output -> Brightness $target"
-  xrandr --output "$output" --brightness "$target"
-done
+main() {
+  if [[ "$#" -gt 1 ]]; then
+    echo "Error: too many arguments." >&2
+    echo
+    show_help
+    return 1
+  fi
 
-echo
-show_brightness
+  case "${1:---toggle}" in
+  --light)
+    set_brightness 1
+    ;;
+
+  --dark)
+    set_brightness 0
+    ;;
+
+  --toggle)
+    if is_dark; then
+      set_brightness 1
+    else
+      set_brightness 0
+    fi
+    ;;
+
+  --show|-s)
+    show_brightness
+    ;;
+
+  --help|-h)
+    show_help
+    ;;
+
+  *)
+    echo "Error: unknown option: $1" >&2
+    echo
+    show_help
+    return 1
+    ;;
+  esac
+}
+
+main "$@"
