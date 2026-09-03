@@ -1,52 +1,36 @@
 #!/usr/bin/env bash
 
 #
-# ToDesk 远程连接监听器
+# ToDesk / GNOME RDP 远程连接监听器
 #
 # 作用：
-#   持续监听 ToDesk 服务日志。
-#   当日志中出现：
+#   持续监听 ToDesk 服务日志，当检测到远程桌面会话启动时执行 COMMAND。
+#   可选监听 GNOME Remote Desktop，当检测到 RDP 客户端成功建立会话时执行同一个 COMMAND。
 #
-#       CSeviceEventHandler LaunchSession desktop
+# ToDesk 日志每天会生成新的 service*.log，因此脚本会自动寻找并切换到最新日志；
+# tail 异常退出时也会自动重新启动。
 #
-#   说明 ToDesk 正在启动一次远程桌面会话，
-#   此时自动执行：
+# GNOME RDP 通过 systemd journal 监听，不需要处理日志文件轮转。
+# 设置 ENABLE_GNOME_RDP=false 可以完全关闭 GNOME RDP 的监听和 hook。
 #
-#       /home/charming/bin/shell_scripts/gigberg-scripts/toggle-brightness.sh --dark
-#
-# 设计说明：
-#
-#   ToDesk 的日志文件每天都会生成新的文件，例如：
-#
-#       /var/log/todesk/servicebgivfhtt_2026_09_03.log
-#       /var/log/todesk/servicebgivfhtt_2026_09_04.log
-#
-#   因此不能永久写死某一天的日志文件。
-#
-#   这个脚本的逻辑是：
-#
-#       1. 找到 /var/log/todesk 下最新的 service*.log
-#       2. 从文件末尾开始监听新日志
-#       3. 发现远程桌面连接事件后执行 COMMAND
-#       4. 每隔一段时间检查 ToDesk 是否生成了新的日志文件
-#       5. 如果跨天产生新日志，则停止旧 tail，重新监听新文件
-#       6. 如果 tail 意外退出，也自动重新启动
-#
-#   整个脚本以普通用户 charming 运行，不需要 sudo。
-#   前提是 charming 用户拥有 /var/log/todesk/service*.log 的读取权限。
+# 整个脚本以普通用户运行，不需要 sudo。
+# 前提是当前用户具有 ToDesk service*.log 的读取权限。
 #
 
 set -u
 
 LOG_DIR="/var/log/todesk"
-PATTERN="CSeviceEventHandler LaunchSession desktop"
+TODESK_PATTERN="CSeviceEventHandler LaunchSession desktop"
+GNOME_RDP_PATTERN="[RDP.CLIPRDR] Client capabilities:"
+
 COMMAND="/home/charming/bin/shell_scripts/gigberg-scripts/toggle-brightness.sh --dark"
 
-CHECK_INTERVAL=10
-COOLDOWN=5
-LAST_TRIGGER=0
+# true：同时监听 GNOME RDP
+# false：只监听 ToDesk
+ENABLE_GNOME_RDP="${ENABLE_GNOME_RDP:-true}"
 
-get_latest_log() {
+# 返回最近修改的 ToDesk service 日志。
+get_latest_todesk_log() {
   find "$LOG_DIR" \
     -maxdepth 1 \
     -type f \
@@ -57,62 +41,105 @@ get_latest_log() {
     cut -d' ' -f2-
 }
 
+# 执行远程连接后的统一 hook。
+run_hook() {
+  local source="$1"
+
+  echo "$(date '+%F %T') $source remote desktop session detected"
+  bash -c "$COMMAND" &
+}
+
+# 持续监听 ToDesk。
+watch_todesk() {
+  while true; do
+    local log newest line
+
+    log="$(get_latest_todesk_log)"
+
+    if [[ -z "$log" ]]; then
+      sleep 2
+      continue
+    fi
+
+    echo "$(date '+%F %T') Watching ToDesk: $log"
+
+    coproc TODESK_TAIL {
+      tail -n 0 -F "$log"
+    }
+
+    exec {TODESK_FD}<&"${TODESK_TAIL[0]}"
+
+    while true; do
+      if IFS= read -r -t 10 -u "$TODESK_FD" line; then
+        if [[ "$line" == *"$TODESK_PATTERN"* ]]; then
+          run_hook "ToDesk"
+        fi
+      fi
+
+      newest="$(get_latest_todesk_log)"
+
+      if [[ -n "$newest" && "$newest" != "$log" ]]; then
+        echo "$(date '+%F %T') ToDesk log changed: $log -> $newest"
+
+        kill "$TODESK_TAIL_PID" 2>/dev/null || true
+        wait "$TODESK_TAIL_PID" 2>/dev/null || true
+        exec {TODESK_FD}<&-
+        break
+      fi
+
+      if ! kill -0 "$TODESK_TAIL_PID" 2>/dev/null; then
+        echo "$(date '+%F %T') ToDesk tail exited, restarting"
+
+        exec {TODESK_FD}<&-
+        break
+      fi
+    done
+  done
+}
+
+# 持续监听 GNOME Remote Desktop 的 journal。
+watch_gnome_rdp() {
+  while true; do
+    echo "$(date '+%F %T') Watching GNOME RDP"
+
+    journalctl \
+      --user \
+      -fn0 \
+      -u gnome-remote-desktop.service |
+      while IFS= read -r line; do
+        if [[ "$line" == *"$GNOME_RDP_PATTERN"* ]]; then
+          run_hook "GNOME RDP"
+        fi
+      done
+
+    echo "$(date '+%F %T') GNOME RDP journal watcher exited, restarting"
+    sleep 2
+  done
+}
+
+# 退出时同时停止所有后台 watcher。
 cleanup() {
-  if [[ -n "${TAILPROC_PID:-}" ]]; then
-    kill "$TAILPROC_PID" 2>/dev/null || true
-    wait "$TAILPROC_PID" 2>/dev/null || true
-  fi
+  [[ -n "${TODESK_WATCHER_PID:-}" ]] &&
+    kill "$TODESK_WATCHER_PID" 2>/dev/null || true
+
+  [[ -n "${GNOME_RDP_WATCHER_PID:-}" ]] &&
+    kill "$GNOME_RDP_WATCHER_PID" 2>/dev/null || true
+
+  wait 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
 
-while true; do
-  log="$(get_latest_log)"
+# ToDesk 始终启用。
+watch_todesk &
+TODESK_WATCHER_PID=$!
 
-  if [[ -z "$log" ]]; then
-    sleep 2
-    continue
-  fi
+# GNOME RDP 根据配置决定是否启用。
+if [[ "$ENABLE_GNOME_RDP" == "true" ]]; then
+  watch_gnome_rdp &
+  GNOME_RDP_WATCHER_PID=$!
+else
+  echo "$(date '+%F %T') GNOME RDP watcher disabled"
+fi
 
-  echo "$(date '+%F %T') Watching: $log"
-
-  coproc TAILPROC {
-    tail -n 0 -F "$log"
-  }
-
-  exec {TAIL_FD}<&"${TAILPROC[0]}"
-
-  while true; do
-    if IFS= read -r -t "$CHECK_INTERVAL" -u "$TAIL_FD" line; then
-      if [[ "$line" == *"$PATTERN"* ]]; then
-        now="$(date +%s)"
-
-        if ((now - LAST_TRIGGER >= COOLDOWN)); then
-          LAST_TRIGGER="$now"
-
-          echo "$(date '+%F %T') ToDesk desktop session detected"
-
-          bash -c "$COMMAND" &
-        fi
-      fi
-    fi
-
-    newest="$(get_latest_log)"
-
-    if [[ -n "$newest" && "$newest" != "$log" ]]; then
-      echo "$(date '+%F %T') Log changed: $log -> $newest"
-
-      kill "$TAILPROC_PID" 2>/dev/null || true
-      wait "$TAILPROC_PID" 2>/dev/null || true
-      exec {TAIL_FD}<&-
-      break
-    fi
-
-    if ! kill -0 "$TAILPROC_PID" 2>/dev/null; then
-      echo "$(date '+%F %T') tail exited, restarting watcher"
-
-      exec {TAIL_FD}<&-
-      break
-    fi
-  done
-done
+wait
