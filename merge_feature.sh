@@ -46,6 +46,7 @@ usage() {
   --mode=direct               直接 rebase feature，保留原有流程
 
 其他选项:
+  --tmpname <分支名>     指定临时分支名（仅 temp 和 temp-update-feature 模式）
   --skip-push-feature  不推送 feature 分支
   --mr                 创建 Merge Request，不在本地合并
   -h, --help           显示帮助
@@ -56,6 +57,9 @@ usage() {
 
   # tagent 项目：通过临时分支合并到 dev，feature 保持不变
   bash ../merge_feature.sh --mode=temp dev
+
+  # 指定临时分支名
+  bash ../merge_feature.sh --mode=temp --tmpname merge-my-feature dev
 
   # tagent 项目：合并到 test，并将 feature 对齐到 test
   bash ../merge_feature.sh --mode=temp-update-feature test
@@ -83,6 +87,17 @@ parse_args() {
         ;;
       --mode=*)
         MODE=${1#--mode=}
+        shift
+        ;;
+      --tmpname)
+        [ "$#" -ge 2 ] || die "--tmpname 缺少参数"
+        TEMP_BRANCH="$2"
+        [ -n "$TEMP_BRANCH" ] || die "--tmpname 缺少参数"
+        shift 2
+        ;;
+      --tmpname=*)
+        TEMP_BRANCH=${1#--tmpname=}
+        [ -n "$TEMP_BRANCH" ] || die "--tmpname 缺少参数"
         shift
         ;;
       --skip-push-feature)
@@ -135,6 +150,10 @@ validate_args() {
     die "--mr 不能与 --mode=temp-update-feature 同时使用"
   fi
 
+  if [ -n "$TEMP_BRANCH" ] && [ "$MODE" = direct ]; then
+    die "--tmpname 仅可用于 temp 或 temp-update-feature 模式"
+  fi
+
   if [ -n "$(git status --porcelain)" ]; then
     die "工作区不干净，请先提交或暂存当前改动"
   fi
@@ -154,6 +173,10 @@ print_summary() {
   echo "功能分支: $FEATURE_BRANCH"
   echo "远程仓库: $REMOTE"
 
+  if [ -n "$TEMP_BRANCH" ]; then
+    echo "临时分支: $TEMP_BRANCH"
+  fi
+
   if [ "$SKIP_PUSH_FEATURE" -eq 0 ]; then
     echo "推送功能分支: 是"
   else
@@ -168,8 +191,13 @@ print_summary() {
 }
 
 make_temp_branch_name() {
-  safe_feature=$(printf '%s' "$FEATURE_BRANCH" | tr '/ ' '--')
-  TEMP_BRANCH="merge-${safe_feature}-$$"
+  if [ -n "$TEMP_BRANCH" ]; then
+    git check-ref-format --branch "$TEMP_BRANCH" >/dev/null || die "无效的临时分支名: $TEMP_BRANCH"
+  else
+    safe_feature=$(printf '%s' "$FEATURE_BRANCH" | tr '/ ' '--')
+    TEMP_BRANCH="merge-${safe_feature}-$$"
+  fi
+
   if git show-ref --verify --quiet "refs/heads/$TEMP_BRANCH"; then
     die "临时分支已存在: $TEMP_BRANCH"
   fi
