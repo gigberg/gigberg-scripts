@@ -64,7 +64,7 @@
 
   # 第一次rebase：merge前feature的准备
   git checkout "$FEATURE_BRANCH"
-  git rebase "$REMOTE/$TARGET_BRANCH"
+  git rebase "$REMOTE/$TARGET_BRANCH" # 这里如果是本地远程同一个分支就可以直接 git pull --rebase（含 fetch + rebase）
   if [ "$SKIP_PUSH_FEATURE" -eq 0 ]; then
     git push "$REMOTE" "$FEATURE_BRANCH" -f
   fi
